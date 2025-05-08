@@ -1,0 +1,203 @@
+---
+title: "Exploring Stalin’s Corpus: A Topic Modeling Approach"
+author: "Geoffrey Zhang"
+format: revealjs
+editor: visual
+jupyter: python3
+include-in-header:
+  - text: |
+      <style type="text/css">
+      ul li {
+        font-size: 0.8em;
+      }
+      </style>
+    
+---
+
+# 
+
+<h1>How does Stalin use his writings and speeches to command the public?</h1>
+
+## The Corpus - Preprocessing
+
+-   Corpus of documents from the [Josef Stalin Internet Archive](https://www.marxists.org/reference/archive/stalin/works/collected/index.htm)
+
+    -   These are translated, English documents - the original source text is Russian.
+
+-   868 total works in my corpus from 1901 to 1952 - documents with undefined URLs or no dates were dropped.
+
+# 
+
+```{python}
+#| fig-align: center         # keep it centred; “stretch” isn’t a valid option
+
+import pandas as pd
+import matplotlib.pyplot as plt
+data = pd.read_csv('stalin_corpus.csv', encoding='utf-8')
+import ast
+data['tokens'] = data['tokens'].apply(ast.literal_eval)
+import string
+
+plt.rcParams['figure.dpi'] = 300
+plt.rcParams['savefig.dpi'] = 300
+
+def remove_punctuation(tokens):
+    # Create a translation table that maps each punctuation character to None
+    translator = str.maketrans('', '', string.punctuation)
+
+    # Remove punctuation from each token
+    return [token.translate(translator) for token in tokens]
+
+
+data['tokens'] = data['tokens'].apply(remove_punctuation)
+data["year"] = data["url"].str[:4]
+
+data["year"] = pd.to_numeric(data["year"], errors='coerce')
+
+    # Drop rows where the column has NaN
+data = data.dropna(subset=["year"])
+data["year"].plot(kind = "hist", title="Stalin Works Over Time", xlabel= "Year",edgecolor='black',  color='red', bins=[1900, 1910, 1920, 1930, 1940, 1950, 1960])
+
+```
+
+# 
+
+```{python}
+data["word_count"]=data['tokens'].apply(len)
+data_means = data.groupby(['year']).agg(avg = ('word_count', "mean"), count = ('year', 'count'))
+data_means['avg'].plot(kind='line', figsize=(8, 4), title='Average Token Count By Year', xlabel = "Year", ylabel = "Average Token Count", color = "red")
+
+
+```
+
+## Topic Modeling - LDA
+
+Topic modeling gives us a better view into the changing nature of Stalin’s writings over time.
+
+-   Using scikit-learn’s CountVectorizer, I create a document-term matrix of unigrams and bigrams.
+
+    -   I discard stopwords and words that appear in fewer than 25 documents or more than 85% of documents.
+
+-   After, I use a Latent Dirichlet Allocation (LDA) topic model to provide me with 5 groupings of topics with 10 words each.
+
+## Topics Identified
+
+::: {style="font-size: 24pt;"}
+|  |  |
+|------------------------|-----------------------------------------------|
+| Topic | Words |
+| Government Structure | soviet party people war union central national question committee state |
+| Military Structure and War | gen troops col red maj army german maj gen order day |
+| The People’s Revolution | workers revolution government party revolutionary conference committee counter proletariat cadets |
+| Labor Issues | party class industry workers collective state country working farms new |
+| Party Ideology | party revolution proletariat lenin question class socialism workers country trotsky |
+:::
+
+## 
+
+```{python}
+from sklearn.feature_extraction.text import CountVectorizer
+import re
+import numpy as np
+df = data
+def preprocess_text(text):
+    text = text.lower()
+    text = re.sub(r'\d+', '', text)
+    return text
+
+vectorizer = CountVectorizer(preprocessor=preprocess_text,
+                             ngram_range=(1,2),
+                             min_df=25, # min_df: discard words appearing in fewer than n documents, percentage or count
+                             max_df=.85, # max_df: discard words appearing in more than n documents, percentage or count
+                             decode_error='replace',
+                             strip_accents='unicode', # noticed some encoding errors when examining the dataframe
+                             stop_words='english')
+
+dtm = vectorizer.fit_transform(df.text.astype(str).to_list()) #requires iterable object over raw text documents
+vocab = vectorizer.get_feature_names_out()
+
+dtm = dtm.toarray()
+vocab = np.array(vocab)
+from sklearn.decomposition import LatentDirichletAllocation
+
+# Run LDA
+
+lda = LatentDirichletAllocation(n_components=5,
+                                max_iter=5,#maximum number of iterations
+                                learning_method='online', #Method used to update
+                                learning_offset=50,
+                                random_state=0).fit(dtm)
+
+
+# Display top words associated with each topic
+
+def display_topics(model, feature_names, no_top_words):
+    for topic_idx, topic in enumerate(model.components_):
+        print("Topic %d:" % (topic_idx))
+        print(" ".join([feature_names[i] for i in topic.argsort()[:-no_top_words - 1:-1]]))
+
+no_top_words = 10
+lda.fit(dtm)
+single_topic = lda.components_[0]
+top_10_words = single_topic.argsort()[-10:]
+topic_results = lda.transform(dtm)
+
+topic_results[0].round(2)
+df['Topic'] = topic_results.argmax(axis=1)
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
+# Count occurrences of each Topic per Year
+df_counts = df.groupby(['year', 'Topic']).size().reset_index(name='Count')
+
+# Pivot the data for plotting
+df_pivot = df_counts.pivot(index='year', columns='Topic', values='Count').fillna(0)
+threshold = df_counts['Count'].quantile(0.97)
+
+custom_labels = {"0":"Government Structure", "1":"Military Structure and War","2":"The People’s Revolution","3":"Labor Issues","4":"Party Ideology"}
+df_pivot = df_pivot.rolling(window=2, min_periods=1).mean()
+
+
+# Plot the data
+plt.figure(figsize=(10, 5))
+plot = sns.lineplot(data=df_pivot, markers=True)
+handles, labels = plot.get_legend_handles_labels()
+new_labels = [custom_labels.get(label, label) for label in labels]  # Replace with custom labels
+plt.legend(handles, new_labels, title="Topics", loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=3)  # Adjust position if needed
+
+# Formatting
+plt.title('Trends of Stalin Text Topics Over Time')
+plt.xlabel('Year')
+plt.ylabel('Document Count')
+plt.grid(True)
+
+# Show the plot
+plt.show()
+
+```
+
+# 
+
+```{python}
+from bunkatopics import Bunka
+docs = data['text'].tolist()
+from sentence_transformers import SentenceTransformer
+embedding_model = SentenceTransformer(model_name_or_path="paraphrase-multilingual-mpnet-base-v2")
+
+# Load Projection Model
+import umap
+projection_model = umap.UMAP(
+                n_components=2,
+                random_state=42,
+            )
+# Initialize Bunka with your chosen model and language preference
+bunka = Bunka(embedding_model=embedding_model,
+              projection_model = projection_model)
+
+# Fit Bunka to your text data
+bunka.fit(docs)
+bunka.visualize_topics(width=800, height=1000, colorscale='Blues', density = True,label_size_ratio = 60, convex_hull = True, show_text = True)
+
+```
